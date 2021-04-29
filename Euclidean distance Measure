@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Mar 18 16:15:36 2021
+
+@author: ethancrouse
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 12 17:55:40 2021
+
+@author: ethancrouse
+"""
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pickle
+import itertools
+from scipy.spatial import distance
+import h5py
+import tables
+import sys
+
+
+
+
+def main():
+
+    global animals_and_trial
+    global binned_animals_and_trial
+    binned_animals_and_trial = []
+    animals_and_trial = []
+    filename = 'palproject_17_03_2021_appended.h5'
+    hdf_file=h5py.File(filename,'r')
+    
+    def traverse_datasets(hdf_file): #traverses entire h5 for target dataset
+        
+        def h5py_dataset_iterator(g, prefix=''): #iterate thru
+            for key in g.keys():
+                item = g[key]
+                path = f'{prefix}/{key}'
+                if isinstance(item, h5py.Dataset): #test for dataset
+                    yield (path, item)
+                elif isinstance(item, h5py.Group): #test for group (go down)
+                    yield from h5py_dataset_iterator(item, path)
+
+        for path, _ in h5py_dataset_iterator(hdf_file):
+            yield path
+    
+    with h5py.File(filename, 'r') as f:
+        for dset in traverse_datasets(f):
+            print(dset)
+            print('Shape:', f[dset].shape)
+            if dset.endswith('GC_spike_trains') \
+                or dset.endswith('LH_spike_trains'): #filter out data arrays
+                
+                #Adjust /ANIMAL/TRIAL/ here 
+                
+                if dset.startswith('/EC18/'):
+                    dset = dset[:-16] #cutoff end of string
+                    animals_and_trial.append(dset) #appends paths IN ORDER
+    
+    hdf_file.close() #close file so that tables can open it 
+    
+    hf5 = tables.open_file(filename, 'r+')
+    global arrays_list
+    arrays_list = []
+    for animal_trial in animals_and_trial:
+        path = str(animal_trial)
+        trains_dig_in = hf5.list_nodes(path)
+        arrays_list.append(np.array(trains_dig_in[0]))#appends data array 
+    
+    for animal in range(len(arrays_list)):
+        n = animal
+        animal_n_list = arrays_list[n]
+        binned_animals_and_trial.append(pre_process(np.asarray(animal_n_list),n)) #append binned array for each animal
+    
+    for animal_trial in range(len(binned_animals_and_trial)): #main program loop
+        dists = euc_dist(binned_animals_and_trial[animal_trial]) #euclidean distance calculations
+        dist_plots(dists,animal_trial) #plot distances
+
+
+def pre_process(animal_,n): #sliding window mean - bin 7000 ms to 271 bins
+    animal_ = np.array(animal_)                       #TASTE x TRIAL x NEURON x TIME- 7000 ms
+
+    print('\n Binning',animals_and_trial[n],' . . .')
+    window_size = 250 #ms
+    step_size = 25 #ms
+    global binned_set
+    binned_set = np.empty(shape=(animal_.shape[0],animal_.shape[1],\
+                                  animal_.shape[2],271))
+    for taste in range(animal_.shape[0]):
+        for trial in range(animal_.shape[1]):
+            for neuron in range(animal_.shape[2]):
+                tbin = animal_[taste,trial,neuron] #tbin equals every 7000ms span
+                i = 0
+                x = 0 
+                while i < len(tbin) - window_size + 1: #sliding window average - cutoff to avoid edge overlap
+                    window = tbin[i : i + window_size] #generates window
+                    window_average = sum(window) / window_size #takes window average
+                    binned_set[int(taste),int(trial),int(neuron),x] = window_average
+                    i += step_size #step size
+                    x+=1
+    print("\n Binned!")
+    return(binned_set) #TASTE x TRIAL x NEURON x TIME- 271 ms
+
+
+def euc_dist(binned_set): #calculate euclidean distances for each neuron, tastant pairwise, for timebin(fr)
+    
+    #binned_set: #TASTE x TRIAL x NEURON x TIME
+    #binned_averaged: TASTE x NEURONx x TIME
+    #binned_normalized: TASTE x NEURON x TIME
+    #euc_dists: PAIR x DISTANCES
+    
+    #average firing rates for each neuron in each timebin across all 30 trials
+    binned_averaged = np.empty(shape=(binned_set.shape[0],\
+                                      binned_set.shape[2],binned_set.shape[3]))
+    for taste in range(binned_set.shape[0]):
+        for neuron in range(binned_set.shape[2]):
+            for timebin in range(binned_set.shape[3]):
+                average_fr = np.mean(binned_set[taste,:,neuron,timebin])
+                binned_averaged[taste,neuron,timebin] = average_fr
+    
+    #normalize firing rates to pre-stimulus baseline
+    binned_normalized = np.empty(shape=(binned_averaged.shape[0],\
+                                        binned_averaged.shape[1],\
+                                        binned_averaged.shape[2]))
+    for taste in range(binned_averaged.shape[0]):
+        for neuron in range(binned_averaged.shape[1]):
+            binned_normalized[taste,neuron,:] = \
+            binned_averaged[taste,neuron,:].T/np.mean(binned_averaged[taste,neuron,0:80]) 
+    
+    #generate the euclidean distances of all neurons for each timebin, for each pair
+    global euc_dists 
+    pairs = list(itertools.combinations(range(binned_set.shape[0]),2)) #Tastant pair set generation
+    euc_dists = np.empty(shape=(len(pairs),binned_normalized.shape[2])) #initialize empty array 
+    for pair,i in zip(pairs,range(len(pairs))):
+        for timebin in range(binned_normalized.shape[2]):
+            euc_dists[i,timebin] = \
+                distance.euclidean(binned_normalized[pair[0],:,timebin],\
+                                   binned_normalized[pair[1],:,timebin])
+    
+    return euc_dists #to main (PAIR X TIME)
+    #fix plotting
+
+                    #####################################################################
+                    #############################-PLOTTING-##############################
+
+def dist_plots(euc_dists,n):
+        
+    #heatmaps 
+   
+    # #create plotting arena
+    # fig, axes = plt.subplots(nrows=2, ncols=3,figsize=(10,5),\
+    #                           sharex=True, sharey=True, squeeze=False)
+    # #formatting
+    # fig.text(0.07, 0.5,'Neuron', va='center',rotation=90,fontsize=15)
+    # fig.text(0.48, 0.01, 'Timebins', ha='center',fontsize=15)
+    # title = 'Pairwise Euclidean Distances: ',(animals_and_trial[n]),str(n+1)
+    # fig.suptitle(title,fontsize=16)
+    # fig.subplots_adjust(hspace=0.3)
+    
+    # for ax,idx in zip(axes.flat,range(euc_dists.shape[0])):
+    #     ax.imshow(euc_dists[idx,:,:],aspect='auto') #one pair, all neurons, all trials
+    #     ax.set_title(pairs[idx]) 
+    
+                     #####################################################################
+
+    #plots each tastant pair's euclidean distance measure over time 
+
+    fig, ax = plt.subplots(figsize=(8,5))
+    time_set = np.arange(-2000,4751,25)
+    plt.plot(time_set[60:180],euc_dists[:,60:180].T)
+    ax.legend(list(itertools.combinations(['NaClHigh','NaClLow',\
+                                           'CAHigh','QHCLow'],2)),ncol=2,fontsize=9)
+    ax.set_xlabel('Time from Taste Delivery (ms)')
+    ax.set_ylabel('Euclidean Distance (normalized to baseline)')
+    title = ('Animal and Trial: ',animals_and_trial[n], 'n=',len(binned_set[2]))
+    fig.suptitle(title,fontsize=16)
+    
+    # AS_Tastes: ['NaClHigh','NaClLow','CAHigh','QHCLow']
+    # KM_Tastes: ['SUC','NaClHigh','CAHigh','QHCLow]
+    # EC_Tastes: ['NaClHigh','NaClLow','CAHigh','QHCLow'] *SAME AS AS_Tastes
+    # OR_Tastes: ['SUC','SAC','NaClHigh','CAHigh','QHCLow]
+    
+   
+
+                     #####################################################################
+
+    #euc_dists: PAIR x DISTANCES
+    
+    #plot standard error of the mean over time 
+    
+    # import scipy.stats as stats
+    # fig, ax = plt.subplots(figsize=(8,5))
+    # ax.plot(np.nanmean(euc_dists[[0,5],60:180],axis=(0)),label='sim',color='darkblue')
+    # #above code traces mean 
+    # ax.fill_between(np.array(range(0,120)),\
+    #                 np.nanmean(euc_dists[[0,5],60:180],axis=(0)) + \
+    #                     stats.sem(np.nanmean(euc_dists[[0,5],60:180],axis=(0)),axis=1),\
+    #                 #above code traces SEM above mean
+    #                 np.nanmean(euc_dists[[0,5],60:180],axis=(0)) - \
+    #                     stats.sem(np.nanmean(euc_dists[[0,5],60:180],axis=(0)),axis=1),\
+    #                 color='darkblue',alpha=0.3)
+    #                 #above code traces SEM below mean 
+    
+    # ax.plot(np.nanmean(euc_dists[[1,2,3,4],60:180],axis=(0)),label='dissim',color='darkred')
+    # ax.fill_between(np.array(range(0,120)),\
+    #                 np.nanmean(euc_dists[[1,2,3,4],60:180],axis=(0)) + \
+    #                     stats.sem(np.nanmean(euc_dists[[1,2,3,4],60:180],axis=(0)),axis=1),\
+    #                 np.nanmean(euc_dists[[1,2,3,4],60:180],axis=(0)) - \
+    #                     stats.sem(np.nanmean(euc_dists[[1,2,3,4],60:180],axis=(0)),axis=1),\
+    #                 color='darkred',alpha=0.3)
+
+    # ax.set_xticks(range(0,120,10))
+    # ax.set_xticklabels(range(-500,2500,250))
+    # ax.legend()
+    # ax.set_xlabel('Time from Taste Delivery (ms)')
+    # ax.set_ylabel('Euclidean Distance (change from baseline) - SEM')
+    # title = ('Animal and Trial: ',animals_and_trial[n], 'n=',euc_dists.shape[1])
+    # fig.suptitle(title,fontsize=16)
+
+                    #####################################################################
+
+    #plot PPI between euclidean distances of similar and dissimilar pairs over time 
+
+
+    import scipy.stats as stats
+    fig, ax = plt.subplots(figsize=(8,5))
+    
+    ax.plot(np.nanmean(euc_dists[[1,2,3,4],60:80],axis=(0,1)) -\
+            np.nanmean(euc_dists[[0,5],60:80],axis=(0,1))\
+                            ,label='PPI',color='darkblue')
+    
+    #above code calculates PPI
+    ax.set_xticks(range(0,120,10))
+    ax.set_xticklabels(range(-500,2500,250))
+    ax.legend()
+    ax.set_xlabel('Time from Taste Delivery (ms)')
+    ax.set_ylabel('PPI: (DISSIM_dist - SIM_dist')
+    title = ('Animal and Trial: ',animals_and_trial[n], 'n=',euc_dists.shape[1])
+    fig.suptitle(title,fontsize=16)
+    ax.axhline(y=0,linewidth=2, color='r',linestyle='--',alpha=0.3)
+
+
+
+main() 

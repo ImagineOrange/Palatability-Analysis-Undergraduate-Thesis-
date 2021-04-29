@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Feb 25 16:56:50 2021
+
+@author: ethancrouse
+"""
+
+import os
+import pandas as pd
+import numpy as np
+import easygui
+import pingouin as pg
+import matplotlib.pyplot as plt
+from pandas.plotting import table
+import seaborn as sns
+from sklearn.preprocessing import MinMaxScaler
+
+
+def main(): #open and stack appropriate dataframes
+    
+    BAT_directory = easygui.diropenbox\
+        (msg = 'Select the directory where the BAT datframes are: ') #get BAT directory
+    os.chdir(BAT_directory) #change directory to desired directory
+    file_list = os.listdir('./') #returns list of files in directory
+    df_list = []
+    for file in file_list: #append all dfs
+        if file[-2:] == 'df':
+            df_list.append(file)
+    dataframes = easygui.multchoicebox\
+        (msg = 'Select the dataframes you want to work with. ',\
+                                      choices = ([x for x in df_list])) #select dfs
+    unpacked=[]
+    for df in range(len(dataframes)):
+        unpacked.append(pd.read_pickle(dataframes[df]))
+    global combined_normalized
+    combined_normalized = pd.concat(unpacked) #stack dfs
+    pre_process(combined_normalized)
+    mann_whitney(combined_normalized,ephys_animals_normalized)
+    
+    
+def pre_process(combined_normalized): #label tastants, trim dataframe
+    
+    global ephys_animals_normalized
+    ephys_animals_normalized = combined_normalized.loc\
+        [(combined_normalized.Animal.isin(['EC18','KM32','KM35','AS28','KM41',\
+                                           'AS23','EC12','EC19','KM37','OR68']))] #ephys animals
+    print('\n All BAT animals in dataframe:\n',\
+          combined_normalized['Animal'].unique(),\
+          '\n\n BAT + EPHYS animals:\n',\
+              ephys_animals_normalized['Animal'].unique(),'\n')
+
+
+def mann_whitney(combined_normalized,ephys_animals_normalized): #perform test of similarity
+    
+    list_of_u_values = []
+    for group in ['AS','EC','KM','OR']: #loop through taste-grouped dfs in list
+        df = ephys_animals_normalized.loc\
+        [(ephys_animals_normalized.TASTANT_GROUP.isin([group]))]
+        
+        animals = df['Animal'].unique()
+        for x in range(len(animals)): #loop through animals in each taste group
+            animal=animals[x]
+            animal_df = df.loc[(df.Animal.isin([animal]))]
+            #list_of_testdays = animal_df['Notes'].unique()
+            #for tday in range(len(list_of_testdays)): #loop through test days in each animal  ### commented out to get means
+            #day=list_of_testdays[tday]
+        
+            animal_df.groupby(['Notes','SOLUTION_y'])['SOLUTION_y'].count() 
+
+            dset = animal_df #unique tastes
+            unique_tastes = sorted(dset['SOLUTION_y'].unique())
+        
+            #verify that you have more than one presentation (observation) 
+            #query out those which meet this assumption
+            global viable_tastes
+            viable_tastes = [x for x,y in zip(unique_tastes,\
+                                        np.array(dset.groupby(['SOLUTION_y'])['SOLUTION_y'].count())) if y>1]
+            
+            #change U value dependent variable here 
+            
+            b_w=pg.pairwise_ttests(dv='int_first_bout_y',\
+                            between='SOLUTION_y', data=dset.loc[dset['SOLUTION_y'].\
+                                    isin(viable_tastes)],parametric=False,return_desc=True) #pairwise hypothesis test
+            print("\nU_values calculated for: ",animal,'\n\n',b_w)
+            b_w['ANIMAL']=animal
+            #b_w['test']=day
+            b_w = b_w.rename(columns=({'p-unc':'p_values'}))
+            list_of_u_values.append(b_w) #append day, animal df to list
+
+    global combined_u_values
+    global sim_pairs
+    global dissim_pairs
+    
+    
+    combined_u_values = pd.concat(list_of_u_values) #get combined t values from concat list
+    combined_u_values['SIM?'] = np.where(combined_u_values['p_values']> 0.05, True, False)
+
+    combined_u_values.to_csv('combined_u_values.csv')
+    sim_pairs = combined_u_values.loc[(combined_u_values.p_values>0.05)] #above p=0.05
+    dissim_pairs = combined_u_values.loc[(combined_u_values.p_values<0.05)] #below p=0.05
+    
+    
+main()
+
+

@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Feb  2 20:11:30 2021
+
+@author: ethancrouse
+"""
+
+
+# Import stuff!
+# from scipy.stats import rankdata
+# from scipy.stats import spearmanr
+# from scipy.stats import pearsonr
+
+#for parallel processing
+# import multiprocessing
+# from joblib import Parallel, delayed, parallel_backend
+#import numpy as np
+# import tables
+# import sys
+# import itertools
+
+
+import os
+import pandas as pd
+import easygui
+import pingouin as pg
+import matplotlib.pyplot as plt
+from pandas.plotting import table
+import seaborn as sns
+from sklearn.preprocessing import MinMaxScaler
+import numpy as np
+
+#BRIEF ACCESS TASK ANALYSIS
+
+def main(): #open appropriate dataframe and pass to analysis 
+    
+    BAT_directory = easygui.diropenbox\
+        (msg = 'Select the directory where the BAT datframe file is: ') #get BAT directory
+    os.chdir(BAT_directory) #change directory to desired directory, will also be used for saving df
+    file_list = os.listdir('./') #returns list of files in directory
+    HF5_list = []
+    for file in file_list: #append all hf5s
+        if file[-2:] == 'df':
+            HF5_list.append(file)
+    BAT_files = easygui.multchoicebox(
+    msg = 'Select the dataframe you want to work with. ', #select file
+    choices = ([x for x in HF5_list]))
+    global df
+    df = pd.read_pickle(BAT_files[0]) #read selected file
+    df['Bouts_mean'] = df['Bouts_mean'].fillna(0) #replace nans with 0 
+    df['Animal'] = df['Animal'].str.strip() #fix animal label spacing --- makes .isin() work 
+    
+    pre_process(df)
+    normalization(AS_tastes)
+    plotting_variance(AS_tastes,AS_normalized)
+    save_dataframes(AS_normalized,AS_raw)
+    # plotting_gross(AS_tastes,AS_normalized)
+    
+def pre_process(df): #group by tastant class, starting with AS tastes - will compare licks and mean bouts
+    processed_df = df.loc[(df.LICKS>0)] #filter out non-licks
+    processed_df = processed_df.loc[(processed_df.Bouts_mean>0)] #filter out non-bouts
+   
+    #group by tastant classes below:
+    
+    global AS_tastes
+    AS_tastes = processed_df.loc[(processed_df.Animal.isin(['AS23','EC12','EC17','KM37',\
+                                                            'EC19','EC20','AS28']))]
+    AS_tastes['tasteID'] = '' #placeholder
+    AS_tastes.loc[(AS_tastes['SOLUTION'].isin(['CALow','CAHigh',\
+                                                                     'CITRIC_ACID','CITRICACID'])),\
+                            ['tasteID']] = 'CA' #LABEL CA          
+    AS_tastes.loc[(AS_tastes['SOLUTION']\
+                             .isin(['QHCLow','QHCHigh','QHCl','QHCL','QHC'])),\
+                            ['tasteID']] = 'QH' #LABEL QHCL
+    AS_tastes.loc[(AS_tastes['SOLUTION']\
+                             .isin(['NaClLow','NaClHigh','NACL','NaCl'])),\
+                            ['tasteID']] = 'NaCl' #LABEL NaCl
+    AS_tastes.loc[(AS_tastes['SOLUTION']
+                             .isin(['WATER'])),\
+                            ['tasteID']] = 'WATER' #LABEL WATER
+    AS_tastes.loc[(AS_tastes['SOLUTION'].\
+                             isin(['SUCROSE'])),\
+                            ['tasteID']] = 'SUC' #LABEL SUCROSE
+    AS_tastes.loc[(AS_tastes['SOLUTION'].
+                             isin(['SACCHARINE'])),\
+                            ['tasteID']] = 'SAC' #LABEL SACCHARINE 
+
+
+def normalization(AS_tastes):
+    
+    #notes is session i.e. test 1...2...etc
+    global AS_raw
+    AS_raw = AS_tastes[['Animal','Notes','SOLUTION','LICKS',\
+                              'Bouts_mean','tasteID','Bouts']].copy() #simplify df for normalization
+    
+    #block of code below formats 'Bouts' column in a consistent way, and generates a new  column of first bouts
+    AS_raw['Bouts'] = AS_raw['Bouts'].astype(str)
+    new_first_bouts = []
+    
+    for index,row in AS_raw.iterrows():
+        string = row['Bouts']
+        string_list = string.split()
+        
+        if string_list[0] != '[':
+            first_bout = string_list[0]
+        else:
+            first_bout = string_list[1] #for cases where bouts is something like: [ 4, 5, 3]
+     
+        first_bout = first_bout.replace(" ",'') #replace unwanted elements
+        first_bout = first_bout.replace("]",'')
+        first_bout = first_bout.replace("[",'')
+        
+        new_first_bouts.append(first_bout) 
+    
+    AS_raw['First_Bout'] = new_first_bouts 
+    AS_raw = AS_raw.replace(r'^\s*$', np.NaN, regex=True)
+    AS_raw.fillna(0,inplace=True)
+    
+    AS_raw['int_first_bout'] = AS_raw['First_Bout'].astype('int')
+    AS_raw = AS_raw.drop(['First_Bout'],axis=1)
+    
+    #do for all tastes, run through U values for all animals 
+    
+    global AS_session_means
+    AS_session_means = AS_raw.groupby(['Animal','Notes','SOLUTION']).mean() #groupby and take mean
+    AS_session_means.reset_index(inplace =True)
+    global AS_normalized
+    AS_normalized = AS_session_means[AS_session_means['SOLUTION']=='WATER'].\
+                        merge(AS_raw,on=['Animal','Notes']) #combine water means for licks to normalized
+
+    AS_normalized.rename({'LICKS_x': 'M_H2O_LICKS', 'Bouts_mean_x': 'M_H20_BMEAN',\
+                   }, axis=1, inplace=True) #rename columns 
+    
+    AS_normalized['Normalized_Licks'] = (AS_normalized['LICKS_y']-AS_normalized\
+                                    ['M_H2O_LICKS'])/(AS_normalized['LICKS_y']+\
+                                                      AS_normalized['M_H2O_LICKS']) #normalize Licks
+    AS_normalized['Normalized_Bouts'] = (AS_normalized['Bouts_mean_y']-AS_normalized\
+                                    ['M_H20_BMEAN'])/(AS_normalized['Bouts_mean_y']+\
+                                                      AS_normalized['M_H20_BMEAN']) #normalize Bouts
+                                                      
+
+def save_dataframes(AS_normalized,AS_raw): #save tastant-grouped dataframes to directory as pickle
+
+    AS_normalized['TASTANT_GROUP'] = 'AS'
+    global AS_ephys_tastes
+    AS_ephys_tastes = AS_normalized.loc[(AS_normalized.SOLUTION_y.isin(['NaClHigh','NaClLow',\
+                                                                        'CAHigh','QHCLow']))]
+    #filter by ephys tastes
+    AS_ephys_tastes.to_pickle('AS_ephys_tastes.df')
+    AS_normalized.to_pickle('AS_tastes.df')
+    
+                    ##################################################################
+                    ##########################-PLOTTING-##############################
+
+
+# def plotting_gross(AS_raw,AS_normalized): #plot gross licks and Bouts_mean
+    
+    # sns.boxplot(data = AS_normalized,\
+    #         x= 'SOLUTION_y',\
+    #         y='int_first_bout_y',showfliers=False)\
+    #         .set(title="AS_TASTES: FIRST BOUT Across Trials, n=7, GROSS")
+    # plt.xlabel("Tastant",size=15)
+    # plt.ylabel("Mean Bout Length",size=15)
+    # plt.show() #MEAN BOUT LENGTH - BOXPLOT -- AGGREGATE MEAN GROSS
+    
+    # sns.boxplot(data = AS_raw,\
+    #         x= 'SOLUTION',\
+    #         y='LICKS',showfliers=False)\
+    #         .set(title="AS_TASTES: Mean Licks Across Trials, n=7, GROSS")
+    # plt.xlabel("Tastant",size=15)
+    # plt.ylabel("Mean Licks",size=15)
+    # plt.show() #MEAN LICKS - BOXPLOT -- AGGREGATE MEAN GROSS
+    
+    # sns.boxplot(data = AS_normalized,\
+    #         x= 'SOLUTION_y',\
+    #         y='Normalized_Bouts',showfliers=False)\
+    #         .set(title="AS_TASTES: Mean Bout Length Across Trials, NORMALIZED(SESSION WATER), n=7")
+    # plt.xlabel("Tastant",size=15)
+    # plt.ylabel("Mean Bout Length",size=15)
+    # plt.show() #MEAN BOUT LENGTH - BOXPLOT -- AGGREGATE MEAN NORMALIZED
+    
+    # sns.boxplot(data = AS_normalized,\
+    #         x= 'SOLUTION_y',\
+    #         y='Normalized_Licks',showfliers=False)\
+    #         .set(title="AS_TASTES: Mean Licks Across Trials, NORMALIZED(SESSION WATER), n=7")
+    # plt.xlabel("Tastant",size=15)
+    # plt.ylabel("Mean Licks",size=15)
+    # plt.show() #MEAN LICKS - BOXPLOT -- AGGREGATE MEAN NORMALIZED
+    # pass
+
+def plotting_variance(AS_raw,AS_normalized): #plot relative variances  
+    
+    sns.set_style("white")
+    
+    # a = sns.catplot(data = AS_normalized[AS_normalized.Animal.notnull()],\
+    #         x= 'SOLUTION_y',order=sorted(AS_normalized.SOLUTION_y.unique()),\
+    #         y='int_first_bout_y',col_wrap=4,\
+    #         ci='sd',col='Animal',kind='bar') #Box Licks NORMALIZED
+    # a.fig.suptitle('FIRST BOUTS: AS_TASTES, NORMALIZED(SESSION WATER), n = 7', fontsize=16,y=1.03) #normalized/SD
+    
+    # b = sns.catplot(data = AS_normalized[AS_normalized.Animal.notnull()],\
+    #         x= 'SOLUTION_y',order=sorted(AS_normalized.SOLUTION_y.unique()),\
+    #         y='int_first_bout_y',col_wrap=4,\
+    #         ci='sd',col='Animal',kind='bar') #Box Bouts NORMALIZED
+    # b.fig.suptitle('FIRST BOUTS: AS_TASTES, NORMALIZED(SESSION WATER), n = 7', fontsize=16,y=1.03) #normalized/SD
+
+
+    # a = sns.scatterplot(data = AS_normalized[AS_normalized.Animal['EC18']],\
+    #         x= 'SOLUTION_y',\
+    #         y='int_first_bout_y',\
+    #         ci='sd') #Box Licks NORMALIZED
+   
+    
+
+
+
+
+main()
+print("\n\n *** THIS PROGRAM IS GROUPING AS_TASTES ***")
+    
+#save as csv 
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
